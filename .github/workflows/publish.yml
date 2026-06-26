@@ -29,8 +29,7 @@ jobs:
           registry-url: "https://registry.npmjs.org"
 
       # No build step — pi runs the .ts directly (tsc --noEmit).
-      # No NPM_TOKEN secret needed: OIDC trusted publisher (npm Trusted Publisher → GitHub Actions).
-      # Requires npm-side config: Trusted Publisher → GitHub Actions → ersintarhan/pi-sync, workflow publish.yml.
+      # No NPM_TOKEN secret: OIDC trusted publisher (npm Trusted Publisher -> GitHub Actions).
+      # Requires npm-side config: Trusted Publisher -> GitHub Actions -> ersintarhan/pi-sync, workflow publish.yml.
+      # id-token: write (above) is what mints the short-lived OIDC token setup-node exchanges.
       - run: npm publish --access public --provenance
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
