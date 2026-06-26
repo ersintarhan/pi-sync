@@ -1,0 +1,40 @@
+{
+  "name": "@ersintarhan/pi-sync",
+  "version": "0.1.0",
+  "description": "Encrypted + compressed per-session sync for pi coding agent (S3/R2 compatible).",
+  "type": "module",
+  "license": "MIT",
+  "private": false,
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "pi",
+    "sync",
+    "s3",
+    "encrypted",
+    "session"
+  ],
+  "files": [
+    "src",
+    "README.md",
+    "LICENSE"
+  ],
+  "pi": {
+    "extensions": [
+      "./src/sync.ts"
+    ]
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "demo": "node --import tsx src/sync.ts"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "0.79.8",
+    "typescript": "^5.6.0",
+    "tsx": "^4.19.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/ersintarhan/pi-sync"
+  }
+}
