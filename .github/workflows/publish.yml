@@ -29,7 +29,8 @@ jobs:
           registry-url: "https://registry.npmjs.org"
 
       # No build step — pi runs the .ts directly (tsc --noEmit).
-      # npm ci not needed either: package ships only src/ + README + LICENSE.
+      # No NPM_TOKEN secret needed: OIDC trusted publisher (npm Trusted Publisher → GitHub Actions).
+      # Requires npm-side config: Trusted Publisher → GitHub Actions → ersintarhan/pi-sync, workflow publish.yml.
       - run: npm publish --access public --provenance
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
