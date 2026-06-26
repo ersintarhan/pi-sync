@@ -11,10 +11,14 @@
  */
 import { createCipheriv, createDecipheriv, randomBytes } from "node:crypto";
 import { gzipSync, gunzipSync } from "node:zlib";
-import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
 import { S3, type S3Config } from "./s3.js";
+import {
+  buildLocalManifest, loadRemoteManifest, saveRemoteManifest, diffManifests,
+  SESSIONS_PREFIX, type Manifest, type Diff,
+} from "./manifest.js";
+import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
+import { join, dirname } from "node:path";
 
 /** One encrypted blob = nonce(12) + ciphertext + tag(16). Key derived/kept externally. */
 export interface Sealed {
@@ -73,6 +77,87 @@ export function loadConfig(): S3Config | null {
   return { endpoint, bucket, region: region ?? "auto", accessKeyId, secretAccessKey };
 }
 
+export function keyFromEnvOrThrow(): Buffer {
+  const raw = process.env.PI_SYNC_ENCRYPTION_KEY;
+  if (!raw) throw new Error("PI_SYNC_ENCRYPTION_KEY not set. Generate with: openssl rand -base64 32");
+  return keyFromEnv(raw);
+}
+
+const ENC_UTF8 = (s: string) => Buffer.from(s, "utf-8");
+
+function localPathFor(key: string): string {
+  // S3 key 'sessions/<rel>' -> ~/.pi/agent/sessions/<rel>
+  const rel = key.startsWith(SESSIONS_PREFIX) ? key.slice(SESSIONS_PREFIX.length) : key;
+  return join(homedir(), ".pi/agent/sessions", rel);
+}
+
+export interface SyncReport {
+  pushed: number; pulled: number; deletedRemote: number; upToDate: number;
+  errors: string[];
+}
+
+/** Push: upload changed/new local sessions (last-writer-wins), refresh remote manifest. */
+export async function pushSync(cfg: S3Config): Promise<SyncReport> {
+  const s3 = new S3(cfg);
+  const key = keyFromEnvOrThrow();
+  const local = buildLocalManifest();
+  if (!local) throw new Error("no local sessions dir (~/.pi/agent/sessions)");
+  const remote = await loadRemoteManifest(s3, key);
+  const d = diffManifests(local, remote);
+  const report: SyncReport = { pushed: 0, pulled: 0, deletedRemote: 0, upToDate: d.upToDate, errors: [] };
+
+  for (const e of d.toPush) {
+    try {
+      const plain = readFileSync(localPathFor(e.key));
+      await s3.putObject(e.key, seal(plain, key).body);
+      report.pushed++;
+    } catch (err) { report.errors.push(`push ${e.key}: ${String(err)}`); }
+  }
+  // ponytail: remote-only files → leave them (don't auto-delete; safer). Manifest keeps them.
+  // Rebuild manifest from local view + any remote entries we didn't touch.
+  const kept = remote ? remote.entries.filter((re) => !local.entries.some((le) => le.key === re.key)) : [];
+  const merged: Manifest = { ...local, entries: [...local.entries, ...kept] };
+  await saveRemoteManifest(s3, merged, key);
+  return report;
+}
+
+/** Pull: download remote-newer sessions, overwrite local (last-writer-wins). */
+export async function pullSync(cfg: S3Config): Promise<SyncReport> {
+  const s3 = new S3(cfg);
+  const key = keyFromEnvOrThrow();
+  const local = buildLocalManifest();
+  const remote = await loadRemoteManifest(s3, key);
+  if (!remote) throw new Error("remote manifest not found — nothing to pull");
+  const d = diffManifests(local ?? { version: 1, updatedAt: 0, entries: [] }, remote);
+  const report: SyncReport = { pushed: 0, pulled: 0, deletedRemote: 0, upToDate: d.upToDate, errors: [] };
+
+  for (const e of d.toPull) {
+    try {
+      const got = await s3.getObject(e.key);
+      if (!got) { report.errors.push(`pull ${e.key}: 404`); continue; }
+      const plain = open({ body: got }, key);
+      const dest = localPathFor(e.key);
+      mkdirSync(dirname(dest), { recursive: true });
+      writeFileSync(dest, plain);
+      report.pulled++;
+    } catch (err) { report.errors.push(`pull ${e.key}: ${String(err)}`); }
+  }
+  return report;
+}
+
+/** Status: show local vs remote diff without changing anything. */
+export async function statusSync(cfg: S3Config): Promise<{ diff: Diff; localCount: number; remoteCount: number }> {
+  const s3 = new S3(cfg);
+  const key = keyFromEnvOrThrow();
+  const local = buildLocalManifest() ?? { version: 1 as const, updatedAt: 0, entries: [] };
+  const remote = await loadRemoteManifest(s3, key);
+  return {
+    diff: diffManifests(local, remote),
+    localCount: local.entries.length,
+    remoteCount: remote?.entries.length ?? 0,
+  };
+}
+
 // --- ponytail: runnable self-check. Crypto always; S3 roundtrip if configured. ---
 if (import.meta.url === `file://${process.argv[1]}`) {
   (async () => {
@@ -121,6 +206,19 @@ if (import.meta.url === `file://${process.argv[1]}`) {
     if (!e2eOk) process.exit(1);
   } else {
     console.log("\n(skip S3 roundtrip: set PI_SYNC_ENCRYPTION_KEY + ~/.pi/agent/pi-sync.local.json to enable)");
+  }
+
+  // --- SYNC roundtrip: push real local sessions, then status ---
+  const cfg2 = loadConfig();
+  if (cfg2 && process.env.PI_SYNC_ENCRYPTION_KEY) {
+    console.log("\n=== sync push (real local sessions → IDrive) ===");
+    const report = await pushSync(cfg2);
+    console.log(`pushed: ${report.pushed}, upToDate: ${report.upToDate}, errors: ${report.errors.length}`);
+    if (report.errors.length) console.log("  errors:", report.errors.slice(0, 3));
+    console.log("\n=== sync status (local vs remote) ===");
+    const st = await statusSync(cfg2);
+    console.log(`local: ${st.localCount} sessions, remote: ${st.remoteCount}`);
+    console.log(`toPush: ${st.diff.toPush.length}, toPull: ${st.diff.toPull.length}, upToDate: ${st.diff.upToDate}`);
   }
   })().catch((e) => { console.error(e); process.exit(1); });
 }
