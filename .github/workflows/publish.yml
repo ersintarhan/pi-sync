@@ -1,0 +1,35 @@
+# Auto-publish to npm on version tags.
+# ponytail: tag-driven, so publish is always intentional — `npm version patch && git push --tags`.
+# Provenance (sigstore-signed) gives a verifiable build provenance on npm.
+name: publish
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch: # manual run from Actions tab
+
+permissions:
+  contents: read
+  id-token: write # required for npm provenance
+
+concurrency:
+  group: publish-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          registry-url: "https://registry.npmjs.org"
+
+      # No build step — pi runs the .ts directly (tsc --noEmit).
+      # npm ci not needed either: package ships only src/ + README + LICENSE.
+      - run: npm publish --access public --provenance
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
