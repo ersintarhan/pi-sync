@@ -1,6 +1,6 @@
 {
   "name": "@ersintarhan/pi-sync",
-  "version": "0.1.5",
+  "version": "0.1.6",
   "description": "Encrypted + compressed per-session sync for pi coding agent (S3/R2 compatible).",
   "type": "module",
   "license": "MIT",
