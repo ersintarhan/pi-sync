@@ -28,8 +28,19 @@ jobs:
           node-version: "20"
           registry-url: "https://registry.npmjs.org"
 
-      # No build step — pi runs the .ts directly (tsc --noEmit).
-      # No NPM_TOKEN secret: OIDC trusted publisher (npm Trusted Publisher -> GitHub Actions).
-      # Requires npm-side config: Trusted Publisher -> GitHub Actions -> ersintarhan/pi-sync, workflow publish.yml.
-      # id-token: write (above) is what mints the short-lived OIDC token setup-node exchanges.
+      # DEBUG: dump the OIDC claims npm will compare against the Trusted Publisher config.
+      # Remove once publish is green.
+      - name: OIDC claims
+        run: |
+          echo "workflow_ref=$GITHUB_REF"
+          echo "repo=$GITHUB_REPOSITORY"
+          echo "workflow=$(basename "$GITHUB_WORKFLOW")"
+          # request the OIDC token and decode its JWT payload
+          TOKEN=$(curl -s -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=npm")
+          echo "$TOKEN" | python3 -c "import sys,json,base64; t=json.load(sys.stdin)['value']; p=t.split('.')[1]; p+='='*(-4-len(p)%4); print(base64.urlsafe_b64decode(p).decode())" || echo "(could not decode OIDC token)"
+        env:
+          ACTIONS_ID_TOKEN_REQUEST_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ACTIONS_ID_TOKEN_REQUEST_URL: ${{ env.ACTIONS_ID_TOKEN_REQUEST_URL }}
+
       - run: npm publish --access public --provenance
