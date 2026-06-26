@@ -71,15 +71,14 @@ export function indexBy(entries: ManifestEntry[]): Map<string, ManifestEntry> {
 /** Diff: what changed between local and remote. Drives push/pull. */
 export interface Diff {
   toPush: ManifestEntry[];   // local newer or new → upload
-  toPull: ManifestEntry[];   // remote newer or new → download
-  toDeleteRemote: string[];  // remote has, local doesn't → delete (push mode)
+  toPull: ManifestEntry[];   // remote newer OR remote-only → download
   upToDate: number;          // unchanged count
 }
 
 export function diffManifests(local: Manifest, remote: Manifest | null): Diff {
   const r = remote ? indexBy(remote.entries) : new Map();
   const l = indexBy(local.entries);
-  const out: Diff = { toPush: [], toPull: [], toDeleteRemote: [], upToDate: 0 };
+  const out: Diff = { toPush: [], toPull: [], upToDate: 0 };
 
   for (const e of local.entries) {
     const rem = r.get(e.key);
@@ -92,10 +91,9 @@ export function diffManifests(local: Manifest, remote: Manifest | null): Diff {
   }
   if (remote) {
     for (const e of remote.entries) {
-      if (!l.has(e.key)) {
-        out.toDeleteRemote.push(e.key);                 // exists remote, not local
-        // (pull-side: treat as pull candidate too, so user can fetch if they want)
-      }
+      // ponytail: remote-only (local deleted it, or fresh machine) → pull it down.
+      // Deletion doesn't propagate via push (push leaves them), so remote wins = fetch.
+      if (!l.has(e.key)) out.toPull.push(e);
     }
   }
   return out;

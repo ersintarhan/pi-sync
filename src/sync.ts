@@ -92,7 +92,7 @@ function localPathFor(key: string): string {
 }
 
 export interface SyncReport {
-  pushed: number; pulled: number; deletedRemote: number; upToDate: number;
+  pushed: number; pulled: number; upToDate: number;
   errors: string[];
 }
 
@@ -104,7 +104,7 @@ export async function pushSync(cfg: S3Config): Promise<SyncReport> {
   if (!local) throw new Error("no local sessions dir (~/.pi/agent/sessions)");
   const remote = await loadRemoteManifest(s3, key);
   const d = diffManifests(local, remote);
-  const report: SyncReport = { pushed: 0, pulled: 0, deletedRemote: 0, upToDate: d.upToDate, errors: [] };
+  const report: SyncReport = { pushed: 0, pulled: 0, upToDate: d.upToDate, errors: [] };
 
   for (const e of d.toPush) {
     try {
@@ -129,7 +129,7 @@ export async function pullSync(cfg: S3Config): Promise<SyncReport> {
   const remote = await loadRemoteManifest(s3, key);
   if (!remote) throw new Error("remote manifest not found — nothing to pull");
   const d = diffManifests(local ?? { version: 1, updatedAt: 0, entries: [] }, remote);
-  const report: SyncReport = { pushed: 0, pulled: 0, deletedRemote: 0, upToDate: d.upToDate, errors: [] };
+  const report: SyncReport = { pushed: 0, pulled: 0, upToDate: d.upToDate, errors: [] };
 
   for (const e of d.toPull) {
     try {
@@ -232,6 +232,23 @@ if (import.meta.url === `file://${process.argv[1]}`) {
     catch { return "✅ tamper rejected (GCM auth)"; }
   })()}`);
   if (!ok) process.exit(1);
+
+  // --- ponytail: diff self-check — remote-only MUST land in toPull (the fix). ---
+  {
+    const local: Manifest = { version: 1, updatedAt: 0, entries: [
+      { key: "sessions/a/shared.jsonl", sha256: "h1", size: 10, mtime: 100 },
+    ] };
+    const remote: Manifest = { version: 1, updatedAt: 0, entries: [
+      { key: "sessions/a/shared.jsonl", sha256: "h1", size: 10, mtime: 100 },
+      { key: "sessions/a/remote-only.jsonl", sha256: "h2", size: 20, mtime: 200 },
+    ] };
+    const d = diffManifests(local, remote);
+    const pulled = d.toPull.map((e) => e.key).includes("sessions/a/remote-only.jsonl");
+    console.log("\n=== pi-sync diff self-check ===");
+    console.log(`toPull: ${d.toPull.map((e) => e.key).join(", ") || "(empty)"}`);
+    console.log(`remote-only pulled: ${pulled ? "✅ OK" : "❌ MISSING — pull would skip deleted/new sessions"}`);
+    if (!pulled) process.exit(1);
+  }
 
   // --- S3 roundtrip: only if config + key are present. End-to-end: seal -> PUT -> GET -> open ---
   const cfg = loadConfig();
