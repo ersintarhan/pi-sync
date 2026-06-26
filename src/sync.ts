@@ -17,7 +17,7 @@ import {
   buildLocalManifest, loadRemoteManifest, saveRemoteManifest, diffManifests,
   SESSIONS_PREFIX, type Manifest, type Diff,
 } from "./manifest.js";
-import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
+import { readFileSync, writeFileSync, mkdirSync, utimesSync } from "node:fs";
 import { join, dirname } from "node:path";
 
 /** One encrypted blob = nonce(12) + ciphertext + tag(16). Key derived/kept externally. */
@@ -88,6 +88,9 @@ const ENC_UTF8 = (s: string) => Buffer.from(s, "utf-8");
 function localPathFor(key: string): string {
   // S3 key 'sessions/<rel>' -> ~/.pi/agent/sessions/<rel>
   const rel = key.startsWith(SESSIONS_PREFIX) ? key.slice(SESSIONS_PREFIX.length) : key;
+  // ponytail: defense-in-depth — manifest is GCM-authed so hard to tamper, but a
+  // crafted key ('sessions/../../etc/foo') must not escape the sessions dir.
+  if (rel.split(/[\\/]/).some((seg) => seg === "..")) throw new Error(`unsafe path: ${key}`);
   return join(homedir(), ".pi/agent/sessions", rel);
 }
 
@@ -113,6 +116,10 @@ export async function pushSync(cfg: S3Config): Promise<SyncReport> {
       report.pushed++;
     } catch (err) { report.errors.push(`push ${e.key}: ${String(err)}`); }
   }
+  // ponytail: don't save the manifest if any PUT failed — otherwise the manifest
+  // would claim files are synced that aren't in S3, and a pull elsewhere would 404.
+  // Retry is idempotent (sha-based diff), so aborting here stays consistent.
+  if (report.errors.length) return report;
   // ponytail: remote-only files → leave them (don't auto-delete; safer). Manifest keeps them.
   // Rebuild manifest from local view + any remote entries we didn't touch.
   const kept = remote ? remote.entries.filter((re) => !local.entries.some((le) => le.key === re.key)) : [];
@@ -139,6 +146,9 @@ export async function pullSync(cfg: S3Config): Promise<SyncReport> {
       const dest = localPathFor(e.key);
       mkdirSync(dirname(dest), { recursive: true });
       writeFileSync(dest, plain);
+      // ponytail: restore the original source mtime so local mtime == remote manifest
+      // mtime (otherwise writeFileSync stamps now(), splitting the two views).
+      utimesSync(dest, e.mtime / 1000, e.mtime / 1000);
       report.pulled++;
     } catch (err) { report.errors.push(`pull ${e.key}: ${String(err)}`); }
   }
