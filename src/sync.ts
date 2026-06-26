@@ -11,6 +11,10 @@
  */
 import { createCipheriv, createDecipheriv, randomBytes } from "node:crypto";
 import { gzipSync, gunzipSync } from "node:zlib";
+import { readFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
+import { S3, type S3Config } from "./s3.js";
 
 /** One encrypted blob = nonce(12) + ciphertext + tag(16). Key derived/kept externally. */
 export interface Sealed {
@@ -52,8 +56,26 @@ export function keyFromEnv(raw: string): Buffer {
   return buf;
 }
 
-// --- ponytail: one runnable self-check. Fails loudly if roundtrip breaks. ---
+/** Load S3 config from ~/.pi/agent/pi-sync.local.json, with PI_SYNC_* env overrides. */
+export function loadConfig(): S3Config | null {
+  const env = process.env;
+  const file = join(homedir(), ".pi/agent/pi-sync.local.json");
+  let f: Partial<S3Config> = {};
+  try { f = JSON.parse(readFileSync(file, "utf-8")); } catch { /* no file */ }
+  const get = (k: string, envKey: string): string | undefined =>
+    (env[envKey] as string | undefined) ?? (f as Record<string, string | undefined>)[k];
+  const endpoint = get("endpoint", "PI_SYNC_ENDPOINT");
+  const bucket = get("bucket", "PI_SYNC_BUCKET");
+  const region = get("region", "PI_SYNC_REGION");
+  const accessKeyId = get("accessKeyId", "PI_SYNC_ACCESS_KEY_ID");
+  const secretAccessKey = get("secretAccessKey", "PI_SYNC_SECRET_ACCESS_KEY");
+  if (!endpoint || !bucket || !accessKeyId || !secretAccessKey) return null;
+  return { endpoint, bucket, region: region ?? "auto", accessKeyId, secretAccessKey };
+}
+
+// --- ponytail: runnable self-check. Crypto always; S3 roundtrip if configured. ---
 if (import.meta.url === `file://${process.argv[1]}`) {
+  (async () => {
   const key = randomBytes(32);
   const sample = Buffer.from(JSON.stringify({
     role: "user",
@@ -75,4 +97,30 @@ if (import.meta.url === `file://${process.argv[1]}`) {
     catch { return "✅ tamper rejected (GCM auth)"; }
   })()}`);
   if (!ok) process.exit(1);
+
+  // --- S3 roundtrip: only if config + key are present. End-to-end: seal -> PUT -> GET -> open ---
+  const cfg = loadConfig();
+  const envKey = process.env.PI_SYNC_ENCRYPTION_KEY;
+  if (cfg && envKey) {
+    console.log("\n=== S3 roundtrip (end-to-end) ===");
+    const s3 = new S3(cfg);
+    const k = keyFromEnv(envKey);
+    const objKey = "pi-sync/_selftest/roundtrip.bin";
+    const payload = Buffer.from("pi-sync end-to-end test " + new Date().toISOString());
+    const sealedPayload = seal(payload, k);
+    console.log(`ping:        ${await s3.ping() ? "✅ reachable" : "❌ unreachable"}`);
+    await s3.putObject(objKey, sealedPayload.body);
+    console.log(`PUT:         ✅ ${objKey} (${sealedPayload.body.length} bytes encrypted)`);
+    const got = await s3.getObject(objKey);
+    if (!got) { console.log("GET:         ❌ not found after PUT"); process.exit(1); }
+    const recovered = open({ body: got }, k);
+    const e2eOk = payload.equals(recovered);
+    console.log(`GET+decrypt: ${e2eOk ? "✅ roundtrip OK" : "❌ MISMATCH"}`);
+    await s3.deleteObject(objKey);
+    console.log(`cleanup:     ✅ deleted ${objKey}`);
+    if (!e2eOk) process.exit(1);
+  } else {
+    console.log("\n(skip S3 roundtrip: set PI_SYNC_ENCRYPTION_KEY + ~/.pi/agent/pi-sync.local.json to enable)");
+  }
+  })().catch((e) => { console.error(e); process.exit(1); });
 }
