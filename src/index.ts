@@ -8,7 +8,7 @@ import { join } from "node:path";
 import { homedir } from "node:os";
 import { randomUUID } from "node:crypto";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { loadConfig, pushSync, pullSync, statusSync, type SyncReport } from "./sync.js";
+import { loadConfig, pushSync, pullSync, statusSync, doctorSync, type SyncReport } from "./sync.js";
 
 const LOCK_STALE_MS = 30 * 60 * 1000;
 const STATE_DIR = join(homedir(), ".pi/agent/.pisync");
@@ -64,7 +64,7 @@ function fmtReport(r: SyncReport): string {
 
 export default function syncExtension(pi: ExtensionAPI): void {
   pi.registerCommand("pisync", {
-    description: "Encrypted per-session sync (S3/R2). Subcommands: status, push, pull, unlock.",
+    description: "Encrypted per-session sync (S3/R2). Subcommands: status, push, pull, doctor, unlock.",
     handler: async (rawArgs: string, ctx: any) => {
       const [sub = "status", ...rest] = rawArgs.trim().split(/\s+/);
       const cfg = loadConfig();
@@ -74,6 +74,20 @@ export default function syncExtension(pi: ExtensionAPI): void {
         if (sub === "status") {
           const st = await withLock("status", () => statusSync(cfg));
           ctx.ui.notify?.(`local: ${st.localCount} | remote: ${st.remoteCount}\ntoPush: ${st.diff.toPush.length} | toPull: ${st.diff.toPull.length} | upToDate: ${st.diff.upToDate}`, "info");
+        } else if (sub === "doctor") {
+          const d = await doctorSync();
+          const cur = readLock();
+          const lines = [
+            `config:      ${d.configOk ? "ok" : "MISSING"} (${d.configSource})`,
+            `encrypt key: ${d.keyOk ? "ok (32-byte)" : "MISSING"}`,
+            `bucket:      ${d.pingOk ? "reachable" : "UNREACHABLE"}`,
+            `local:       ${d.localCount} sessions`,
+            `remote:      ${d.remoteCount} sessions${d.remoteManifest ? "" : " (no manifest yet)"}`,
+            `lock:        ${cur ? `held by pid ${cur.pid} (${isStaleLock(cur) ? "STALE" : "live"})` : "free"}`,
+          ];
+          if (d.errors.length) lines.push(`errors:      ${d.errors.length}`, ...d.errors.slice(0, 3).map((e: string) => `  - ${e}`));
+          const healthy = !d.errors.length && d.configOk && d.keyOk && d.pingOk;
+          ctx.ui.notify?.(lines.join("\n"), healthy ? "success" : "error");
         } else if (sub === "push") {
           const r = await withLock("push", () => pushSync(cfg));
           ctx.ui.notify?.(`✅ push done — ${fmtReport(r)}`, "success");
@@ -87,7 +101,7 @@ export default function syncExtension(pi: ExtensionAPI): void {
           rmSync(LOCK_PATH, { force: true });
           ctx.ui.notify?.(`✅ removed lock (pid ${cur.pid})`, "success");
         } else {
-          ctx.ui.notify?.(`unknown '${sub}'. Use: status, push, pull, unlock.`, "warn");
+          ctx.ui.notify?.(`unknown '${sub}'. Use: status, push, pull, doctor, unlock.`, "warn");
         }
       } catch (e) {
         ctx.ui.notify?.(`❌ ${String((e as Error).message ?? e)}`, "error");

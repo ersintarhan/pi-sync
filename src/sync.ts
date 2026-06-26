@@ -158,6 +158,56 @@ export async function statusSync(cfg: S3Config): Promise<{ diff: Diff; localCoun
   };
 }
 
+export interface DoctorReport {
+  configOk: boolean;
+  configSource: "file" | "env" | "none";
+  keyOk: boolean;
+  pingOk: boolean;
+  remoteManifest: boolean;
+  remoteCount: number;
+  localCount: number;
+  errors: string[];
+}
+
+/** Doctor: read-only diagnostic. No lock, no writes. */
+export async function doctorSync(): Promise<DoctorReport> {
+  const rep: DoctorReport = {
+    configOk: false, configSource: "none", keyOk: false, pingOk: false,
+    remoteManifest: false, remoteCount: 0, localCount: 0, errors: [],
+  };
+
+  // config: detect source (file vs env)
+  const hasFile = (() => { try { return Boolean(readFileSync(join(homedir(), ".pi/agent/pi-sync.local.json"), "utf-8")); } catch { return false; } })();
+  const hasEnv = Boolean(process.env.PI_SYNC_ENDPOINT && process.env.PI_SYNC_ACCESS_KEY_ID);
+  const cfg = loadConfig();
+  rep.configSource = hasFile ? "file" : hasEnv ? "env" : "none";
+  if (!cfg) { rep.errors.push("config missing (need ~/.pi/agent/pi-sync.local.json or PI_SYNC_* env)"); return rep; }
+  rep.configOk = true;
+
+  // encryption key
+  try { keyFromEnvOrThrow(); rep.keyOk = true; }
+  catch (e) { rep.errors.push(`PI_SYNC_ENCRYPTION_KEY: ${(e as Error).message}`); }
+
+  // local sessions
+  const local = buildLocalManifest();
+  rep.localCount = local?.entries.length ?? 0;
+  if (!local) rep.errors.push("no local sessions dir (~/.pi/agent/sessions)");
+
+  // remote: ping + manifest. Skip if key is bad (can't decrypt manifest).
+  if (!rep.keyOk) return rep;
+  const s3 = new S3(cfg);
+  try { rep.pingOk = await s3.ping(); }
+  catch (e) { rep.errors.push(`ping ${cfg.endpoint}: ${(e as Error).message}`); return rep; }
+  if (!rep.pingOk) { rep.errors.push("bucket unreachable"); return rep; }
+  try {
+    const remote = await loadRemoteManifest(s3, keyFromEnvOrThrow());
+    rep.remoteManifest = Boolean(remote);
+    rep.remoteCount = remote?.entries.length ?? 0;
+  } catch (e) { rep.errors.push(`manifest load: ${(e as Error).message}`); }
+
+  return rep;
+}
+
 // --- ponytail: runnable self-check. Crypto always; S3 roundtrip if configured. ---
 if (import.meta.url === `file://${process.argv[1]}`) {
   (async () => {
