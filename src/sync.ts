@@ -120,9 +120,17 @@ export async function pushSync(cfg: S3Config): Promise<SyncReport> {
   // would claim files are synced that aren't in S3, and a pull elsewhere would 404.
   // Retry is idempotent (sha-based diff), so aborting here stays consistent.
   if (report.errors.length) return report;
-  // ponytail: remote-only files → leave them (don't auto-delete; safer). Manifest keeps them.
-  // Rebuild manifest from local view + any remote entries we didn't touch.
-  const kept = remote ? remote.entries.filter((re) => !local.entries.some((le) => le.key === re.key)) : [];
+  // ponytail: keep remote-only entries (another machine created them), but verify
+  // they still exist in S3 — a manual S3 delete (or a pre-0.1.12 partial push) can
+  // leave a manifest entry pointing at nothing. Drop orphans so pull stops 404'ing.
+  const kept: Manifest["entries"] = [];
+  if (remote) {
+    for (const re of remote.entries) {
+      if (local.entries.some((le) => le.key === re.key)) continue;
+      const live = await s3.headObject(re.key).catch(() => null);
+      if (live) kept.push(re);
+    }
+  }
   const merged: Manifest = { ...local, entries: [...local.entries, ...kept] };
   await saveRemoteManifest(s3, merged, key);
   return report;
