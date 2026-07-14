@@ -35,6 +35,30 @@ function fileSha256(path: string): string {
   return createHash("sha256").update(readFileSync(path)).digest("hex");
 }
 
+/** pi encodes cwd as --{cwd.replace(/^[/\\]/,"").replace(/[/\\:]/g,"-")}--.
+ *  homeDirInner mirrors that transform for the home prefix so we can split it off. */
+export function homeDirInner(h: string = homedir()): string {
+  return h.replace(/^[/\\]/, "").replace(/[/\\:]/g, "-");
+}
+
+/** Normalize a pi-encoded cwd dir name so the same project yields the same S3
+ *  key across OSes: /Users/x/proj (mac) and /home/x/proj (linux) both → ~-proj.
+ *  Paths outside home (e.g. /tmp, which mac resolves to /private/tmp) can't be
+ *  reconciled across OSes and are left OS-native. */
+export function normalizeDirName(dirName: string, homeInner: string = homeDirInner()): string {
+  const inner = dirName.replace(/^--/, "").replace(/--$/, "");
+  if (inner === homeInner) return "~";
+  if (inner.startsWith(homeInner + "-")) return "~-" + inner.slice(homeInner.length + 1);
+  return dirName; // outside home — keep OS-native (can't reconcile)
+}
+
+/** Inverse of normalizeDirName: ~ (or ~-rest) → this machine's pi-encoded home dir. */
+export function denormalizeDirName(norm: string, homeInner: string = homeDirInner()): string {
+  if (norm === "~") return "--" + homeInner + "--";
+  if (norm.startsWith("~-")) return "--" + homeInner + norm.slice(1) + "--"; // ~ at [0] → -
+  return norm;
+}
+
 /** Scan the local sessions dir into a manifest. Returns null if dir missing. */
 export function buildLocalManifest(): Manifest | null {
   const root = join(homedir(), ".pi/agent/sessions");
@@ -51,8 +75,12 @@ export function buildLocalManifest(): Manifest | null {
     for (const f of files) {
       if (!f.endsWith(".jsonl")) continue;
       const abs = join(dirPath, f);
-      // ponytail: posix-style key for S3 (sep normalization)
-      const key = (SESSIONS_PREFIX + relative(root, abs)).split(sep).join("/");
+      // ponytail: posix key + cross-OS home normalize (mac /Users/x, linux /home/x → ~)
+      const rel = relative(root, abs).split(sep).join("/");
+      const slash = rel.indexOf("/");
+      const dirName = slash >= 0 ? rel.slice(0, slash) : rel;
+      const tail = slash >= 0 ? rel.slice(slash) : "";
+      const key = SESSIONS_PREFIX + normalizeDirName(dirName) + tail;
       try {
         const st = statSync(abs);
         entries.push({ key, sha256: fileSha256(abs), size: st.size, mtime: st.mtimeMs });

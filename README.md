@@ -71,6 +71,8 @@ The encryption key is shared, the storage is shared, so each machine stays in sy
 1. Finish work on machine A — sessions auto-push on exit (or run `/pisync push`).
 2. Move to machine B — run `/pisync pull` and continue where you left off.
 
+Works **across OSes**: mac (`/Users/you`) and linux (`/home/you`) map to the same session keys — the home prefix is normalized, so your history follows you regardless of platform. Paths outside home (e.g. `/tmp`, which mac resolves to `/private/tmp`) can't be reconciled across OSes and stay OS-native.
+
 Conflict resolution is **last-writer-wins** by file mtime. Don't run two machines on the same session at once.
 
 ## Storage layout
@@ -79,7 +81,7 @@ Conflict resolution is **last-writer-wins** by file mtime. Don't run two machine
 <bucket>/
 ├── manifest.json          # encrypted index: every synced session + sha256 + mtime
 └── sessions/
-    └── <encoded-cwd>/
+    └── <normalized-cwd>/   # home prefix normalized: ~/Projects/x (mac /Users, linux /home → same key)
         └── *.jsonl        # each session: AES-256-GCM(gzip(plaintext))
 ```
 
@@ -89,6 +91,7 @@ Conflict resolution is **last-writer-wins** by file mtime. Don't run two machine
 
 - No build step — `pi` runs the `.ts` directly.
 - No `npm` token needed: releases are published via GitHub Actions OIDC trusted publishing (tag-driven: `npm version patch && git push --tags`).
+- **Upgrading to cross-OS keys (≥0.1.14):** the first `/pisync push` after upgrading re-uploads every session under the normalized key and drops the old OS-specific keys from the manifest (the orphan objects stay in the bucket; delete them manually if you want). No content is lost — local sessions are re-pushed from disk.
 - Sessions are encrypted at rest, so the bucket can hold API keys that appeared in transcripts. Still — keep your encryption key private and rotate storage keys on suspicion.
 
 MIT.

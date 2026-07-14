@@ -15,6 +15,7 @@ import { homedir } from "node:os";
 import { S3, type S3Config } from "./s3.js";
 import {
   buildLocalManifest, loadRemoteManifest, saveRemoteManifest, diffManifests,
+  normalizeDirName, denormalizeDirName,
   SESSIONS_PREFIX, type Manifest, type Diff,
 } from "./manifest.js";
 import { readFileSync, writeFileSync, mkdirSync, utimesSync } from "node:fs";
@@ -86,12 +87,15 @@ export function keyFromEnvOrThrow(): Buffer {
 const ENC_UTF8 = (s: string) => Buffer.from(s, "utf-8");
 
 function localPathFor(key: string): string {
-  // S3 key 'sessions/<rel>' -> ~/.pi/agent/sessions/<rel>
+  // S3 key 'sessions/<rel>' -> ~/.pi/agent/sessions/<rel> (denormalize ~ → this OS's home)
   const rel = key.startsWith(SESSIONS_PREFIX) ? key.slice(SESSIONS_PREFIX.length) : key;
   // ponytail: defense-in-depth — manifest is GCM-authed so hard to tamper, but a
   // crafted key ('sessions/../../etc/foo') must not escape the sessions dir.
   if (rel.split(/[\\/]/).some((seg) => seg === "..")) throw new Error(`unsafe path: ${key}`);
-  return join(homedir(), ".pi/agent/sessions", rel);
+  const slash = rel.indexOf("/");
+  const norm = slash >= 0 ? rel.slice(0, slash) : rel;
+  const tail = slash >= 0 ? rel.slice(slash) : "";
+  return join(homedir(), ".pi/agent/sessions", denormalizeDirName(norm) + tail);
 }
 
 export interface SyncReport {
@@ -127,6 +131,14 @@ export async function pushSync(cfg: S3Config): Promise<SyncReport> {
   if (remote) {
     for (const re of remote.entries) {
       if (local.entries.some((le) => le.key === re.key)) continue;
+      // ponytail: drop pre-0.1.14 OS-native home keys now superseded by the
+      // normalized form (same content lives under sessions/~-...). Keeps the
+      // manifest from doubling up after the cross-OS key migration. Home-outside
+      // keys (e.g. --private-tmp--) satisfy normalizeDirName(d)===d and are kept.
+      const after = SESSIONS_PREFIX.length;
+      const slash = re.key.indexOf("/", after);
+      const dir = slash >= 0 ? re.key.slice(after, slash) : re.key.slice(after);
+      if (normalizeDirName(dir) !== dir) continue;
       const live = await s3.headObject(re.key).catch(() => null);
       if (live) kept.push(re);
     }
@@ -266,6 +278,21 @@ if (import.meta.url === `file://${process.argv[1]}`) {
     console.log(`toPull: ${d.toPull.map((e) => e.key).join(", ") || "(empty)"}`);
     console.log(`remote-only pulled: ${pulled ? "✅ OK" : "❌ MISSING — pull would skip deleted/new sessions"}`);
     if (!pulled) process.exit(1);
+  }
+
+  // --- ponytail: cross-OS normalize self-check — mac /Users/x and linux /home/x → same key ---
+  {
+    const mac = normalizeDirName("--Users-ersin-Projects-foo--", "Users-ersin");
+    const lin = normalizeDirName("--home-ersin-Projects-foo--", "home-ersin");
+    const homeMac = normalizeDirName("--Users-ersin--", "Users-ersin");
+    const homeLin = normalizeDirName("--home-ersin--", "home-ersin");
+    const ok = mac === lin && mac === "~-Projects-foo" && homeMac === homeLin && homeMac === "~";
+    console.log("\n=== pi-sync cross-OS normalize self-check ===");
+    console.log(`mac  --Users-ersin-Projects-foo-- → ${mac}`);
+    console.log(`linux --home-ersin-Projects-foo-- → ${lin}`);
+    console.log(`home mac/linux → ${homeMac} / ${homeLin}`);
+    console.log(`same key: ${ok ? "✅ OK" : "❌ MISMATCH — mac/linux won't see each other"}`);
+    if (!ok) process.exit(1);
   }
 
   // --- S3 roundtrip: only if config + key are present. End-to-end: seal -> PUT -> GET -> open ---
