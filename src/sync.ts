@@ -118,7 +118,12 @@ export async function pushSync(cfg: S3Config): Promise<SyncReport> {
       const plain = readFileSync(localPathFor(e.key));
       await s3.putObject(e.key, seal(plain, key).body);
       report.pushed++;
-    } catch (err) { report.errors.push(`push ${e.key}: ${String(err)}`); }
+    } catch (err) {
+      // ponytail: a file can vanish between scan and push (pi rotating an active
+      // session). It's no longer part of the local view — skip, next push rescans.
+      if ((err as NodeJS.ErrnoException).code === "ENOENT") continue;
+      report.errors.push(`push ${e.key}: ${String(err)}`);
+    }
   }
   // ponytail: don't save the manifest if any PUT failed — otherwise the manifest
   // would claim files are synced that aren't in S3, and a pull elsewhere would 404.
