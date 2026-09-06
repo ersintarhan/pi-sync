@@ -29,7 +29,7 @@
     "demo": "node --import tsx src/sync.ts"
   },
   "devDependencies": {
-    "@earendil-works/pi-coding-agent": "0.79.8",
+    "@earendil-works/pi-coding-agent": "^0.85.1",
     "@types/node": "^26.0.1",
     "tsx": "^4.19.0",
     "typescript": "^5.6.0"
